@@ -1,0 +1,5 @@
+discord.py>=2.3.2
+python-dotenv>=1.0.0
+notion-client>=2.2.1
+httpx>=0.24.1
+python-dateutil>=2.8.2
