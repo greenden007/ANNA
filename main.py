@@ -279,7 +279,7 @@ async def monitor_notion_changes():
             print(f"Error monitoring Notion changes: {e}")
         
         # Wait before checking again
-        await asyncio.sleep(60)  # Check every 1 hour
+        await asyncio.sleep(os.getenv("MONITOR_RATE", 60))  # Check every 1 hour
 
 
 # Run the bot
