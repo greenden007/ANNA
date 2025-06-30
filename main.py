@@ -1,5 +1,6 @@
 import os
 import discord
+import asyncio
 from discord import app_commands
 from discord.ext import commands
 from notion_client import Client
@@ -30,6 +31,7 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         print(f"Synced {len(synced)} command(s)")
+        bot.loop.create_task(monitor_notion_changes())
     except Exception as e:
         print(f"Failed to sync commands: {e}")
 
@@ -165,6 +167,120 @@ async def remove_task(interaction: discord.Interaction, task_name: str):
     except Exception as e:
         await interaction.followup.send(f"❌ Error removing task: {str(e)}")
         print(f"Error: {str(e)}")
+
+@bot.tree.command(name="update_task", description="Update a task")
+@app_commands.describe(task_name="Name of the task to update")
+async def update_task(interaction: discord.Interaction, task_name: str):
+    """Update a task that you've submitted"""
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        # First, find the task
+        response = notion.databases.query(
+            database_id=NOTION_DB_ID,
+            filter={
+                "and": [
+                    {"property": "Name", "title": {"equals": task_name}},
+                    {"property": "Submitted By", "rich_text": {"contains": str(interaction.user)}}
+                ]
+            }
+        )
+        
+        if not response["results"]:
+            await interaction.followup.send("❌ No matching task found or you don't have permission to update it.")
+            return
+        
+        # Update the page
+        notion.pages.update(
+            page_id=response["results"][0]["id"],
+            archived=False
+        )
+        
+        await interaction.followup.send(f"✅ Task '{task_name}' has been updated.")
+    except Exception as e:
+        await interaction.followup.send(f"❌ Error updating task: {str(e)}")
+        print(f"Error: {str(e)}")
+
+async def monitor_notion_changes():
+    await bot.wait_until_ready()
+    
+    # Store the last cursor to only get new changes
+    last_cursor = None
+    
+    while not bot.is_closed():
+        try:
+            # Get all pages from the database
+            response = notion.databases.query(
+                database_id=NOTION_DB_ID,
+                start_cursor=last_cursor
+            )
+            
+            for page in response.get("results", []):
+                try:
+                    # Get the current page with all properties
+                    current_page = notion.pages.retrieve(page_id=page["id"])
+                    properties = current_page.get("properties", {})
+                    
+                    # Check if task was marked as completed
+                    completed = properties.get("Completed", {}).get("checkbox", False)
+                    if completed:
+                        # Get task details before deleting
+                        title = properties.get("Name", {}).get("title", [{}])[0].get("text", {}).get("content", "Untitled")
+                        discord_user_id = properties.get("Discord User ID", {}).get("rich_text", [{}])[0].get("plain_text")
+                        channel_id = properties.get("Channel ID", {}).get("rich_text", [{}])[0].get("plain_text")
+                        
+                        # Delete the completed task
+                        notion.pages.update(
+                            page_id=page["id"],
+                            archived=True
+                        )
+                        
+                        # Debug print to check values
+                        print(f"Task completed - Title: {title}, Channel ID: {channel_id}, User ID: {discord_user_id}")
+                        
+                        # Notify in the original channel
+                        if channel_id and channel_id.strip():
+                            try:
+                                channel_id_int = int(channel_id)
+                                print(f"Attempting to get channel with ID: {channel_id_int}")
+                                channel = bot.get_channel(channel_id_int)
+                                if channel:
+                                    print(f"Found channel: {channel.name} in guild: {getattr(channel.guild, 'name', 'DM')}")
+                                    await channel.send(f"✅ Task completed and removed: **{title}**")
+                                    print("Successfully sent message to channel")
+                                else:
+                                    print(f"Could not find channel with ID: {channel_id_int}")
+                            except ValueError as ve:
+                                print(f"Invalid channel ID format: {channel_id} - {ve}")
+                            except Exception as channel_error:
+                                print(f"Failed to send channel message: {channel_error}")
+                        else:
+                            print("No channel ID found or empty channel ID")
+                        
+                        # Send DM to the user who created the task
+                        if discord_user_id:
+                            try:
+                                user = await bot.fetch_user(int(discord_user_id))
+                                await user.send(f"✅ Your task has been completed and removed: **{title}**")
+                            except Exception as dm_error:
+                                print(f"Failed to send DM: {dm_error}")
+                        
+                        print(f"Deleted completed task: {title}")
+                        
+                except Exception as page_error:
+                    print(f"Error processing page {page.get('id')}: {page_error}")
+            
+            # Update the cursor for the next iteration
+            last_cursor = response.get("next_cursor")
+            if not last_cursor:
+                break  # No more pages to process
+            
+        except Exception as e:
+            print(f"Error monitoring Notion changes: {e}")
+        
+        # Wait before checking again
+        await asyncio.sleep(60)  # Check every 1 hour
+
 
 # Run the bot
 if __name__ == "__main__":
